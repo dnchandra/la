@@ -1,0 +1,4 @@
+server,os,user,log_base_path,log_folder,include_patterns,exclude_patterns
+linux-server-1,linux,ubuntu,/web/logs,app1,"access*,modjk_*","*.tmp,*.dump"
+linux-server-1,linux,ubuntu,/web/logs,app2,"access*,modjk_*","*.tmp,*.dump"
+windows-server-2,windows,Administrator,D:\logs,iis_logs,"*.log,access*","*.tmp,*.bak"
