@@ -1,0 +1,4 @@
+server,user,ssh_key_path
+server1,alice,/home/alice/.ssh/id_rsa
+server1,bob,/home/bob/.ssh/id_rsa
+server2,charlie,/home/charlie/.ssh/id_ed25519
