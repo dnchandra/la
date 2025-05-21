@@ -1,0 +1,103 @@
+import json
+import os
+import subprocess
+from datetime import datetime
+import argparse
+
+INVENTORY_FILE = 'inventory.json'
+LOCAL_ARCHIVE_ROOT = '/logs/archival'  # On Jumpserver
+
+def load_inventory():
+    if not os.path.exists(INVENTORY_FILE):
+        print(f"❌ Inventory file '{INVENTORY_FILE}' not found.")
+        exit(1)
+    with open(INVENTORY_FILE) as f:
+        return json.load(f)
+
+def run_ssh_command(server, user, ssh_key, cmd):
+    ssh_cmd = ["ssh", "-i", ssh_key, f"{user}@{server}", cmd]
+    try:
+        result = subprocess.run(ssh_cmd, capture_output=True, text=True, timeout=60)
+        if result.returncode != 0:
+            print(f"❌ SSH command failed on {server}: {result.stderr.strip()}")
+            return None
+        return result.stdout.strip().splitlines()
+    except Exception as e:
+        print(f"❌ SSH command error on {server}: {e}")
+        return None
+
+def run_rsync_command(src, dest, ssh_key, dry_run):
+    # Use rsync over ssh, -a for archive, -z for compression, -v verbose, --dry-run option
+    cmd = ["rsync", "-azv", "-e", f"ssh -i {ssh_key} -o StrictHostKeyChecking=no"]
+    if dry_run:
+        cmd.append("--dry-run")
+    cmd.extend([src, dest])
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        if result.returncode != 0:
+            print(f"❌ Rsync failed: {result.stderr.strip()}")
+            return False
+        print(result.stdout)
+        return True
+    except Exception as e:
+        print(f"❌ Rsync error: {e}")
+        return False
+
+def find_compressed_files(server, os_type, user, ssh_key, base_path):
+    # Find all .gz and .zip files recursively on remote server
+    if os_type.lower() == 'linux':
+        cmd = f"find '{base_path}' -type f \\( -name '*.gz' -o -name '*.zip' \\)"
+    else:
+        cmd = (f"powershell -Command \"Get-ChildItem -Path '{base_path}' -Recurse -Include '*.gz','*.zip' "
+               f"-File | Select-Object -ExpandProperty FullName\"")
+
+    files = run_ssh_command(server, user, ssh_key, cmd)
+    return files if files else []
+
+def main():
+    parser = argparse.ArgumentParser(description="Archive compressed logs (.gz, .zip) from servers to Jumpserver.")
+    parser.add_argument('--dry-run', action='store_true', help='Show files to archive without actual copy')
+    args = parser.parse_args()
+
+    data = load_inventory()
+    if not data:
+        print("⚠️ Inventory is empty.")
+        return
+
+    for server, info in data.items():
+        os_type = info.get('os', 'linux')
+        ssh_key = info.get('ssh_key')
+        if not ssh_key or not os.path.exists(ssh_key):
+            print(f"❌ Missing or invalid SSH key for {server}, skipping.")
+            continue
+
+        users = info.get('users', {})
+        if not users:
+            print(f"⚠️ No users found for {server}, skipping.")
+            continue
+
+        for user, entries in users.items():
+            for entry in entries:
+                base_path = entry['log_base_path']
+
+                # Compose local dest folder: /logs/archival/{server}/{YYYYMMDD}/
+                date_str = datetime.now().strftime('%Y%m%d')
+                local_dest_dir = os.path.join(LOCAL_ARCHIVE_ROOT, server, date_str)
+                os.makedirs(local_dest_dir, exist_ok=True)
+
+                compressed_files = find_compressed_files(server, os_type, user, ssh_key, base_path)
+                if not compressed_files:
+                    print(f"ℹ️ No compressed files found on {server} user {user} base_path '{base_path}'")
+                    continue
+
+                for file_path in compressed_files:
+                    # Rsync each compressed file to local archive folder preserving filename
+                    src = f"{user}@{server}:'{file_path}'"
+                    dest = os.path.join(local_dest_dir, os.path.basename(file_path))
+                    print(f"📁 Archiving {file_path} from {server} to {dest}")
+                    success = run_rsync_command(src, dest, ssh_key, args.dry_run)
+                    if not success:
+                        print(f"❌ Failed to archive {file_path} from {server}")
+
+if __name__ == '__main__':
+    main()
