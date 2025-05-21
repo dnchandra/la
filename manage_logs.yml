@@ -1,0 +1,106 @@
+---
+- name: Manage logs on Jumpserver
+  hosts: localhost
+  gather_facts: false
+  vars:
+    script_base_path: "/opt/log_management"
+    audit_log_dir: "/logs/script_audit_log"
+    audit_log_file: "{{ audit_log_dir }}/Ansible_output_{{ lookup('pipe', 'date +%Y%m%d_%H%M%S') }}.log"
+
+  tasks:
+    - name: Ensure audit log directory exists
+      file:
+        path: "{{ audit_log_dir }}"
+        state: directory
+        mode: '0755'
+
+    - name: Validate operation and mode
+      fail:
+        msg: >
+          You must specify operation as one of [compress, archive, delete]
+          and mode as one of [dry-run, actual-run].
+          Usage example: -e operation=compress -e mode=dry-run
+      when: operation is not defined or
+            operation not in ['compress', 'archive', 'delete'] or
+            mode is not defined or
+            mode not in ['dry-run', 'actual-run']
+      register: validation_fail
+      ignore_errors: yes
+
+    - name: Write validation failure to audit log and fail if invalid
+      block:
+        - copy:
+            content: "{{ validation_fail.msg }}"
+            dest: "{{ audit_log_file }}"
+        - fail:
+            msg: "{{ validation_fail.msg }}"
+      when: validation_fail is defined and validation_fail.failed
+
+    - name: Run compress_logs.py (dry-run)
+      command: python3 "{{ script_base_path }}/compress_logs.py --dry-run"
+      when: operation == 'compress' and mode == 'dry-run'
+      register: compress_output
+      changed_when: false
+
+    - name: Run compress_logs.py (actual-run)
+      command: python3 "{{ script_base_path }}/compress_logs.py"
+      when: operation == 'compress' and mode == 'actual-run'
+      register: compress_output
+      changed_when: false
+
+    - name: Append compress output to audit log
+      lineinfile:
+        path: "{{ audit_log_file }}"
+        create: yes
+        line: |
+          ==== Compress Logs Output ({{ operation }} - {{ mode }}) ====
+          {{ compress_output.stdout }}
+          ------------------------------------------------------
+
+      when: operation == 'compress'
+
+    - name: Run archive_logs.py (dry-run)
+      command: python3 "{{ script_base_path }}/archive_logs.py --dry-run"
+      when: operation == 'archive' and mode == 'dry-run'
+      register: archive_output
+      changed_when: false
+
+    - name: Run archive_logs.py (actual-run)
+      command: python3 "{{ script_base_path }}/archive_logs.py"
+      when: operation == 'archive' and mode == 'actual-run'
+      register: archive_output
+      changed_when: false
+
+    - name: Append archive output to audit log
+      lineinfile:
+        path: "{{ audit_log_file }}"
+        create: yes
+        line: |
+          ==== Archive Logs Output ({{ operation }} - {{ mode }}) ====
+          {{ archive_output.stdout }}
+          ------------------------------------------------------
+
+      when: operation == 'archive'
+
+    - name: Run delete_logs.py (dry-run)
+      command: python3 "{{ script_base_path }}/delete_logs.py --dry-run"
+      when: operation == 'delete' and mode == 'dry-run'
+      register: delete_output
+      changed_when: false
+
+    - name: Run delete_logs.py (actual-run)
+      command: python3 "{{ script_base_path }}/delete_logs.py"
+      when: operation == 'delete' and mode == 'actual-run'
+      register: delete_output
+      changed_when: false
+
+    - name: Append delete output to audit log
+      lineinfile:
+        path: "{{ audit_log_file }}"
+        create: yes
+        line: |
+          ==== Delete Logs Output ({{ operation }} - {{ mode }}) ====
+          {{ delete_output.stdout }}
+          ------------------------------------------------------
+
+      when: operation == 'delete'
