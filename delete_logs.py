@@ -8,6 +8,7 @@ import argparse
 INVENTORY_FILE = 'inventory.json'
 USER_KEYS_FILE = 'server_user_keys.json'
 DELETE_THRESHOLD_DAYS = 15
+DEFAULT_EXTENSIONS = ('.gz', '.zip')  # Default extensions for deletion
 
 def load_json_file(path):
     if not os.path.exists(path):
@@ -47,8 +48,7 @@ def parse_date_windows(filename):
     m = re.search(r'_ex(\d{6})', filename)
     if m:
         try:
-            dt = datetime.strptime(m.group(1), '%y%m%d').date()
-            return dt
+            return datetime.strptime(m.group(1), '%y%m%d').date()
         except:
             return None
     return None
@@ -65,14 +65,13 @@ def matches_pattern(filename, patterns):
             return True
     return False
 
-def find_files_to_delete(server, os_type, user, ssh_key, base_path, include_patterns, exclude_patterns):
+def find_files_to_delete(server, os_type, user, ssh_key, base_path, include_patterns, exclude_patterns, delete_all):
     threshold_date = datetime.now().date() - timedelta(days=DELETE_THRESHOLD_DAYS)
     
     if os_type.lower() == 'linux':
-        # Find all files older than threshold - we will filter by filename date after fetching
         cmd = f"find '{base_path}' -type f"
     else:
-        cmd = (f"powershell -Command \"Get-ChildItem -Path '{base_path}' -Recurse -File | Select-Object -ExpandProperty FullName\"")
+        cmd = f"powershell -Command \"Get-ChildItem -Path '{base_path}' -Recurse -File | Select-Object -ExpandProperty FullName\""
 
     files = run_ssh_command(server, user, ssh_key, cmd)
     if files is None:
@@ -81,6 +80,11 @@ def find_files_to_delete(server, os_type, user, ssh_key, base_path, include_patt
     filtered_files = []
     for f in files:
         fname = os.path.basename(f)
+
+        # Extension filter unless --all is passed
+        if not delete_all and not fname.lower().endswith(DEFAULT_EXTENSIONS):
+            continue
+
         if include_patterns and not matches_pattern(fname, include_patterns):
             continue
         if exclude_patterns and matches_pattern(fname, exclude_patterns):
@@ -105,10 +109,7 @@ def delete_file(server, user, ssh_key, filepath, os_type, dry_run):
         print(f"[DRY-RUN] Would delete {filepath} on {server} user {user}")
         return
 
-    if os_type.lower() == 'linux':
-        cmd = f"rm -f '{filepath}'"
-    else:
-        cmd = f"powershell -Command Remove-Item -Force '{filepath}'"
+    cmd = f"rm -f '{filepath}'" if os_type.lower() == 'linux' else f"powershell -Command Remove-Item -Force '{filepath}'"
 
     result = run_ssh_command(server, user, ssh_key, cmd)
     if result is None:
@@ -117,8 +118,14 @@ def delete_file(server, user, ssh_key, filepath, os_type, dry_run):
         print(f"✅ Deleted {filepath} on {server} user {user}")
 
 def main():
-    parser = argparse.ArgumentParser(description="Delete logs older than 15 days.")
-    parser.add_argument('--dry-run', action='store_true', help='Show files that would be deleted without deleting')
+    parser = argparse.ArgumentParser(
+        description="Delete logs older than 15 days based on date in filename.\n"
+                    "By default, only deletes .gz or .zip files.\n"
+                    "Use --all to delete all files matching date logic, regardless of extension.",
+        formatter_class=argparse.RawTextHelpFormatter
+    )
+    parser.add_argument('--dry-run', action='store_true', help='Show what would be deleted without actually deleting files')
+    parser.add_argument('--all', action='store_true', help='Delete all matching files, not just .gz or .zip')
     args = parser.parse_args()
 
     inventory = load_json_file(INVENTORY_FILE)
@@ -152,7 +159,7 @@ def main():
                 exclude_patterns = entry.get('exclude_patterns', [])
                 print(f"\n🔍 Processing delete on {server} ({os_type}) user {user} base_path '{base_path}'")
 
-                files_to_delete = find_files_to_delete(server, os_type, user, ssh_key, base_path, include_patterns, exclude_patterns)
+                files_to_delete = find_files_to_delete(server, os_type, user, ssh_key, base_path, include_patterns, exclude_patterns, args.all)
                 if not files_to_delete:
                     print(f"ℹ️ No files to delete on {server} user {user} base_path '{base_path}'")
                     continue
