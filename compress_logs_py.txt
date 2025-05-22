@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 import argparse
 
 INVENTORY_FILE = 'inventory.json'
+USERS_FILE = 'server_users_keys.json'  # <-- new
 COMPRESS_THRESHOLD_DAYS = 5
 
 def load_inventory():
@@ -13,6 +14,13 @@ def load_inventory():
         print(f"❌ Inventory file '{INVENTORY_FILE}' not found.")
         exit(1)
     with open(INVENTORY_FILE) as f:
+        return json.load(f)
+
+def load_user_keys():
+    if not os.path.exists(USERS_FILE):
+        print(f"❌ SSH key file '{USERS_FILE}' not found.")
+        exit(1)
+    with open(USERS_FILE) as f:
         return json.load(f)
 
 def run_ssh_command(server, user, ssh_key, cmd):
@@ -28,7 +36,6 @@ def run_ssh_command(server, user, ssh_key, cmd):
         return None
 
 def parse_date_linux(filename):
-    # e.g. filename.2025-05-20.log or filename.202505200000.log
     m1 = re.search(r'\.(\d{4}-\d{2}-\d{2})', filename)
     if m1:
         try:
@@ -44,12 +51,10 @@ def parse_date_linux(filename):
     return None
 
 def parse_date_windows(filename):
-    # e.g. filename_ex250521_x.log (YYMMDD after _ex)
     m = re.search(r'_ex(\d{6})', filename)
     if m:
         try:
-            dt = datetime.strptime(m.group(1), '%y%m%d').date()
-            return dt
+            return datetime.strptime(m.group(1), '%y%m%d').date()
         except:
             return None
     return None
@@ -70,19 +75,15 @@ def get_files_to_compress(server, os_type, user, ssh_key, base_path, include_pat
     threshold_date = datetime.now().date() - timedelta(days=COMPRESS_THRESHOLD_DAYS)
 
     if os_type.lower() == 'linux':
-        # Find all files NOT compressed (.gz or .zip) recursively
         cmd = f"find '{base_path}' -type f ! -name '*.gz' ! -name '*.zip'"
-        files = run_ssh_command(server, user, ssh_key, cmd)
-        if files is None:
-            return []
     else:
-        # Windows: powershell to get files not ending with .gz or .zip
-        ps_cmd = (f"powershell -Command \"Get-ChildItem -Path '{base_path}' -Recurse -File "
-                  f"| Where-Object {{$_.Extension -notin '.gz','.zip'}} "
-                  f"| Select-Object -ExpandProperty FullName\"")
-        files = run_ssh_command(server, user, ssh_key, ps_cmd)
-        if files is None:
-            return []
+        cmd = (f"powershell -Command \"Get-ChildItem -Path '{base_path}' -Recurse -File "
+               f"| Where-Object {{$_.Extension -notin '.gz','.zip'}} "
+               f"| Select-Object -ExpandProperty FullName\"")
+
+    files = run_ssh_command(server, user, ssh_key, cmd)
+    if files is None:
+        return []
 
     files_to_compress = []
 
@@ -94,7 +95,6 @@ def get_files_to_compress(server, os_type, user, ssh_key, base_path, include_pat
         if exclude_patterns and matches_pattern(fname, exclude_patterns):
             continue
 
-        file_date = None
         if os_type.lower() == 'linux':
             file_date = parse_date_linux(fname)
         else:
@@ -110,7 +110,6 @@ def get_files_to_compress(server, os_type, user, ssh_key, base_path, include_pat
     return files_to_compress
 
 def compress_file(server, user, ssh_key, filepath, os_type, dry_run):
-    # Compress with gzip (Linux) or zip (Windows)
     if dry_run:
         print(f"[DRY-RUN] Would compress {filepath} on {server}")
         return
@@ -118,11 +117,9 @@ def compress_file(server, user, ssh_key, filepath, os_type, dry_run):
     if os_type.lower() == 'linux':
         cmd = f"gzip '{filepath}'"
     else:
-        # zip command: zip filename.zip filename
-        # zip creates zip archive; we create .zip alongside original file
         zip_file = filepath + ".zip"
-        # use PowerShell Compress-Archive for Windows: powershell Compress-Archive -Path file -Destination zipfile
-        cmd = f"powershell -Command Compress-Archive -Path '{filepath}' -DestinationPath '{zip_file}' -Force; Remove-Item -Force '{filepath}'"
+        cmd = (f"powershell -Command Compress-Archive -Path '{filepath}' -DestinationPath '{zip_file}' -Force;"
+               f" Remove-Item -Force '{filepath}'")
 
     result = run_ssh_command(server, user, ssh_key, cmd)
     if result is None:
@@ -135,31 +132,39 @@ def main():
     parser.add_argument('--dry-run', action='store_true', help='List files to compress without compressing')
     args = parser.parse_args()
 
-    data = load_inventory()
-    if not data:
+    inventory = load_inventory()
+    user_keys = load_user_keys()
+
+    if not inventory:
         print("⚠️ Inventory is empty.")
         return
 
-    for server, info in data.items():
+    for server, info in inventory.items():
         os_type = info.get('os', 'linux')
-        ssh_key = info.get('ssh_key')
-        if not ssh_key or not os.path.exists(ssh_key):
-            print(f"❌ Missing or invalid SSH key for {server}, skipping.")
-            continue
         users = info.get('users', {})
         if not users:
             print(f"⚠️ No users found for {server}, skipping.")
             continue
+        if server not in user_keys:
+            print(f"❌ No SSH keys found for {server}, skipping.")
+            continue
+
         for user, entries in users.items():
+            ssh_key = user_keys[server]["users"].get(user)
+            if not ssh_key or not os.path.exists(ssh_key.strip()):
+                print(f"❌ Missing or invalid SSH key for {user}@{server}, skipping.")
+                continue
+
             for entry in entries:
                 base_path = entry['log_base_path']
                 include_patterns = entry.get('include_patterns', [])
                 exclude_patterns = entry.get('exclude_patterns', [])
                 print(f"\n🔍 Processing {server} ({os_type}) user {user} base_path '{base_path}'")
 
-                files_to_compress = get_files_to_compress(server, os_type, user, ssh_key, base_path, include_patterns, exclude_patterns)
+                files_to_compress = get_files_to_compress(server, os_type, user, ssh_key.strip(),
+                                                          base_path, include_patterns, exclude_patterns)
                 for f in files_to_compress:
-                    compress_file(server, user, ssh_key, f, os_type, args.dry_run)
+                    compress_file(server, user, ssh_key.strip(), f, os_type, args.dry_run)
 
 if __name__ == '__main__':
     main()
