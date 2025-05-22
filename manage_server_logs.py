@@ -1,4 +1,3 @@
-# manage_server_logs.py
 import json
 import os
 import pandas as pd
@@ -35,7 +34,7 @@ def view_data():
                 continue
             print(f"  User: {user}")
             for e in entries:
-                print(f"    Base Path: {e['log_base_path']}, Folder: {e['log_folder']}")
+                print(f"    Base Path: {e['log_base_path']}")
                 print(f"    Include: {e['include_patterns']}, Exclude: {e['exclude_patterns']}")
 
 def manual_add_update():
@@ -62,13 +61,11 @@ def manual_add_update():
             print("❌ log_base_path required.")
             continue
 
-        folder = input("Log folder: ").strip()
         include = parse_patterns(input("Include patterns (comma-separated): "))
         exclude = parse_patterns(input("Exclude patterns (comma-separated): "))
 
         entry = {
             'log_base_path': base,
-            'log_folder': folder,
             'include_patterns': include,
             'exclude_patterns': exclude
         }
@@ -90,7 +87,7 @@ def bulk_upload():
         print(f"❌ Read error: {e}")
         return
 
-    required = {'server', 'os', 'user', 'log_base_path', 'log_folder', 'include_patterns', 'exclude_patterns'}
+    required = {'server', 'os', 'user', 'log_base_path', 'include_patterns', 'exclude_patterns'}
     if not required.issubset(df.columns):
         print("❌ Missing required columns.")
         return
@@ -103,7 +100,6 @@ def bulk_upload():
         u, b = str(row['user']).strip(), str(row['log_base_path']).strip()
         if not all([s, os_type, u, b]):
             continue
-        f = str(row['log_folder']).strip() if pd.notna(row['log_folder']) else ""
         inc = parse_patterns(row['include_patterns'])
         exc = parse_patterns(row['exclude_patterns'])
 
@@ -116,7 +112,9 @@ def bulk_upload():
             stats['users'] += 1
 
         data[s]['users'][u].append({
-            'log_base_path': b, 'log_folder': f, 'include_patterns': inc, 'exclude_patterns': exc
+            'log_base_path': b,
+            'include_patterns': inc,
+            'exclude_patterns': exc
         })
         stats['entries'] += 1
 
