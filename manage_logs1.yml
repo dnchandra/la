@@ -1,11 +1,21 @@
 ---
 - name: Manage logs on Jumpserver
   hosts: localhost
-  gather_facts: false
+  gather_facts: false # Good for local playbooks not needing system facts
+
   vars:
-    script_base_path: "/logarchival/"
-    audit_log_dir: "/logarchival/logs/"
-    audit_log_file: "{{ audit_log_dir }}/manage_logs_output_{{ ansible_date_time.iso8601_basic }}.log"
+    script_base_path: "/logarchival"
+    audit_log_dir: "{{ script_base_path }}/logs" # Consistent base path usage
+    timestamp: "{{ ansible_date_time.iso8601_basic_short }}" # Use Ansible facts for timestamp
+    audit_log_file: "{{ audit_log_dir }}/manage_logs_output_{{ timestamp }}.log"
+    # Define allowed operations and modes for clarity and single source of truth
+    allowed_operations: ['compress', 'archive', 'delete']
+    allowed_modes: ['dry-run', 'actual-run']
+    # Script mapping can be defined directly here
+    script_map:
+      compress: "compress_logs.py"
+      archive: "archive_logs.py"
+      delete: "delete_logs.py"
 
   tasks:
     - name: Ensure audit log directory exists
@@ -18,47 +28,53 @@
       ansible.builtin.assert:
         that:
           - operation is defined
-          - operation in ['compress', 'archive', 'delete']
+          - operation in allowed_operations # Use the defined list
           - mode is defined
-          - mode in ['dry-run', 'actual-run']
+          - mode in allowed_modes         # Use the defined list
         fail_msg: >
-          You must specify 'operation' as one of ['compress', 'archive', 'delete']
-          and 'mode' as one of ['dry-run', 'actual-run'].
-          Usage example: -e operation=compress -e mode=dry-run
+          You must specify 'operation' as one of {{ allowed_operations }}
+          and 'mode' as one of {{ allowed_modes }}.
+          Usage example: ansible-playbook your_playbook.yml -e "operation=compress mode=actual-run"
+        quiet: true # Suppresses the default verbose output of assert on success
 
-    - name: Define script mapping
+    - name: Set script path and arguments based on operation and mode
       ansible.builtin.set_fact:
-        script_map:
-          compress: "compress_logs.py"
-          archive: "archive_logs.py"
-          delete: "delete_logs.py"
+        script_to_execute: "{{ script_base_path }}/{{ script_map[operation] }}"
+        script_args: "{% if mode == 'dry-run' %} --dry-run{% endif %}"
+      when: operation in script_map # Ensures operation is valid for script execution
 
     - name: Execute the appropriate script
       ansible.builtin.command:
-        cmd: >
-          python3 "{{ script_base_path }}/{{ script_map[operation] }}"
-          {% if mode == 'dry-run' %}--dry-run{% endif %}
+        cmd: "python3 {{ script_to_execute }}{{ script_args }}"
+        chdir: "{{ script_base_path }}" # Good practice to set working directory if scripts expect it
       register: script_output
-      changed_when: false
-      when: script_map[operation] is defined
+      changed_when: "mode == 'actual-run' and script_output.rc == 0" # Define change based on actual-run and success
+      failed_when: script_output.rc != 0 # Explicitly fail on non-zero return code
+      when: script_to_execute is defined # Only run if script_to_execute was set
 
-    - name: Append script output to audit log
-      ansible.builtin.copy:
-        content: |
-          ==== {{ operation | capitalize }} Logs Output ({{ mode }}) ====
-          {% if script_output is defined and script_output.stdout is defined %}
+    - name: Log script execution details
+      ansible.builtin.blockinfile:
+        path: "{{ audit_log_file }}"
+        create: true # Create the file if it doesn't exist
+        mode: '0644' # Set permissions for the log file
+        block: |
+          ==== {{ operation | capitalize }} Logs Output ({{ mode }}) @ {{ ansible_date_time.iso8601 }} ====
+          Command: python3 {{ script_to_execute }}{{ script_args }}
+          Return Code: {{ script_output.rc }}
           STDOUT:
-          {{ script_output.stdout }}
-          {% else %}
-          No standard output captured.
-          {% endif %}
-          {% if script_output is defined and script_output.stderr is defined %}
+          {{ script_output.stdout | indent(2, True) if script_output.stdout else '  No standard output captured.' }}
           STDERR:
-          {{ script_output.stderr }}
-          {% else %}
-          No error output captured.
-          {% endif %}
+          {{ script_output.stderr | indent(2, True) if script_output.stderr else '  No error output captured.' }}
           ------------------------------------------------------
-        dest: "{{ audit_log_file }}"
-        force: no
+      when: script_output is defined # Only log if script was executed
+
+    - name: Display summary to console
+      ansible.builtin.debug:
+        msg:
+          - "Operation: {{ operation }} ({{ mode }})"
+          - "Script: {{ script_to_execute }}{{ script_args }}"
+          - "Status: {{ 'Success' if script_output.rc == 0 else 'Failed' }}"
+          - "Audit Log: {{ audit_log_file }}"
+          - "STDOUT: {{ script_output.stdout | default('N/A') }}"
+          - "STDERR: {{ script_output.stderr | default('N/A') }}"
       when: script_output is defined
