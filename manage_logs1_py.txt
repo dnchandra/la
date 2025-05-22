@@ -1,0 +1,69 @@
+---
+- name: Manage logs on Jumpserver
+  hosts: localhost
+  gather_facts: false
+  vars:
+    script_base_path: "/logarchival/"
+    audit_log_dir: "/logarchival/logs/"
+    audit_log_file: "{{ audit_log_dir }}/manage_logs_output_{{ lookup('pipe', 'date +%Y%m%d_%H%M%S') }}.log"
+
+  tasks:
+    - name: Ensure audit log directory exists
+      file:
+        path: "{{ audit_log_dir }}"
+        state: directory
+        mode: '0755'
+
+    - name: Validate operation and mode
+      set_fact:
+        validation_fail_msg: >
+          You must specify 'operation' as one of [compress, archive, delete]
+          and 'mode' as one of [dry-run, actual-run].
+          Usage example: -e operation=compress -e mode=dry-run
+      when: operation is not defined or
+            operation not in ['compress', 'archive', 'delete'] or
+            mode is not defined or
+            mode not in ['dry-run', 'actual-run']
+
+    - name: Write validation failure to audit log and fail
+      block:
+        - copy:
+            content: "{{ validation_fail_msg }}"
+            dest: "{{ audit_log_file }}"
+        - fail:
+            msg: "{{ validation_fail_msg }}"
+      when: validation_fail_msg is defined
+
+    - name: Define script mapping
+      set_fact:
+        script_map:
+          compress: "compress_logs.py"
+          archive: "archive_logs.py"
+          delete: "delete_logs.py"
+
+    - name: Execute the appropriate script
+      block:
+        - name: Run the script with dry-run mode
+          command: python3 "{{ script_base_path }}/{{ script_map[operation] }}" --dry-run
+          when: mode == 'dry-run'
+          register: script_output
+          changed_when: false
+
+        - name: Run the script with actual-run mode
+          command: python3 "{{ script_base_path }}/{{ script_map[operation] }}"
+          when: mode == 'actual-run'
+          register: script_output
+          changed_when: false
+
+        - name: Append script output to audit log
+          copy:
+            content: |
+              ==== {{ operation | capitalize }} Logs Output ({{ mode }}) ====
+              STDOUT:
+              {{ script_output.stdout }}
+              STDERR:
+              {{ script_output.stderr }}
+              ------------------------------------------------------
+            dest: "{{ audit_log_file }}"
+            force: no
+      when: script_map[operation] is defined
